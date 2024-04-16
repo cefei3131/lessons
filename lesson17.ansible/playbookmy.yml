@@ -1,0 +1,116 @@
+- name: Lesson17
+  hosts: localhost
+  gather_facts: False
+  vars_files:
+    - ./vars/var.yml
+    - ./vars/credentials.yml
+  tasks:
+    - name: Create ec2
+      amazon.aws.ec2_instance:
+        aws_access_key: "{{ aws_access_key }}"
+        aws_secret_key: "{{ aws_secret_key }}"
+        instance_type: "{{ instance_type }}"
+        image_id: "{{ image_id }}"
+        region: "{{ region }}"
+        security_group: "{{ security_group }}"
+        key_name: "{{ key_pair }}"
+        name: "{{ ec2_name }}"
+        wait: true
+        network:
+          assign_public_ip: true
+      register: ec2
+
+    - name: Add to host group
+      add_host:
+        hostname: "{{ ec2.instances.0.public_ip_address }}"
+        groupname: ec2_group 
+      loop: "{{ ec2.instances }}"
+
+    - name: Wait for SSH to come up
+      vars:
+        ansible_user: "{{ userID }}"
+        ansible_ssh_private_key_file: "{{ key_path }}" 
+        host_key_checking: False
+      delegate_to: "{{ ec2.instances.0.public_dns_name }}"
+      wait_for_connection:
+        delay: 1 
+        timeout: 300 
+      loop: "{{ ec2.instances }}"
+
+- name: Configure  ec2 instance
+  hosts: ec2_group
+  gather_facts: True
+  vars_files:
+    - ./vars/var.yml
+    - ./vars/credentials.yml
+  become: True
+  vars:
+    ansible_user: "{{ userID }}" 
+    ansible_ssh_private_key_file: "{{ key_path }}" 
+    host_key_checking: False
+    container_count: 1 
+    default_container_name: nginx 
+    default_container_image: nginx 
+    default_container_command: sleep 1d
+
+  tasks:
+    - name: Install aptitude
+      apt:
+        name: aptitude
+        state: latest
+        update_cache: true
+
+    - name: Install required system packages
+      apt:
+        pkg:
+          - apt-transport-https
+          - ca-certificates
+          - curl
+          - software-properties-common
+          - python3-pip
+          - virtualenv
+          - python3-setuptools
+        state: latest
+        update_cache: true
+
+    - name: Add Docker GPG apt Key
+      apt_key:
+        url: https://download.docker.com/linux/ubuntu/gpg
+        state: present
+
+    - name: Add Docker Repository
+      apt_repository:
+        repo: deb https://download.docker.com/linux/ubuntu focal stable
+        state: present
+
+    - name: Update apt and install docker-ce
+      apt:
+        name: docker-ce
+        state: latest
+        update_cache: true
+
+    - name: Install Docker Module for Python
+      pip:
+        name: docker
+
+    - name: Pull default Docker image
+      community.docker.docker_image:
+        name: "{{ default_container_image }}"
+        source: pull
+
+    - name: Create  containers
+      community.docker.docker_container:
+        name: "{{ default_container_name }}{{ item }}"
+        image: "{{ default_container_image }}"
+        command: "{{ default_container_command }}"
+        state: present
+      with_sequence: count={{ container_count }}
+
+- name: Terminate instances
+  hosts: localhost
+  become: yes  
+  tasks:
+    - name: Terminate instances that were previously launched
+      amazon.aws.ec2_instance:
+        state: 'absent'
+        instance_ids: '{{ ec2.instance_ids }}'
